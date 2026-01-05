@@ -1,20 +1,49 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 )
 
 type LogEntry struct {
-	Message string
-	Level   string
-	Source  string
+	Message string `json:"message"`
+	Level   string `json:"level"`
+	Source  string `json:"source"`
 }
 
 type Metrics struct {
 	mu          sync.Mutex
 	ErrorCounts map[string]float64
+}
+
+func handleLog(ch chan<- LogEntry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 1. Only allow POST requests
+		if r.Method != http.MethodPost {
+			http.Error(w, "Invalid method", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// 2. Decode JSON payload
+		var entry LogEntry
+		if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
+			http.Error(w, "Bad JSON", http.StatusBadRequest)
+			return
+		}
+
+		// 3. Push to Channel (Non-blocking if buffer has space)
+		select {
+		case ch <- entry:
+			w.WriteHeader(http.StatusAccepted) // 202 Accepted
+			w.Write([]byte("Log ingested"))
+		default:
+			// If buffer is full, drop the log so we don't crash the server
+			http.Error(w, "Queue full", http.StatusServiceUnavailable)
+		}
+	}
 }
 
 func (m *Metrics) IncCounter(source string) {
@@ -58,15 +87,21 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	go producer(ch)
-
+	// 1. Start Workers (Consumers)
+	// These sit in the background waiting for work
 	wg.Add(2)
 	go consumer(ch, metrics, &wg)
 	go consumer(ch, metrics, &wg)
 
-	wg.Wait()
+	// 2. Start HTTP Server
+	// This replaces the old 'producer()' function
+	http.HandleFunc("/log", handleLog(ch))
 
-	fmt.Println("-----------------")
-	fmt.Println("Final stats:", metrics.ErrorCounts)
+	fmt.Println("Server started on port 8080...")
 
+	// ListenAndServe blocks forever, so we don't need wg.Wait() right now
+	// (In Phase 4 we will handle graceful shutdown)
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		fmt.Println("Server failed:", err)
+	}
 }

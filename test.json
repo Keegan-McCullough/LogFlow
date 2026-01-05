@@ -1,0 +1,5 @@
+{
+  "level": "ERROR",
+  "source": "Payment",
+  "message": "Transaction failed"
+}
